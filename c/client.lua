@@ -4,6 +4,8 @@ local currentCamPosition = nil
 local movements = {}
 local movements2 = {}
 local creating = false
+-- NPC management is now handled by hn_recall centralized system
+-- This variable is kept for backward compatibility if needed
 local function createPrompts(keysTable, prompts)
     local array = {}
     for _, keyData in pairs(keysTable) do
@@ -47,7 +49,59 @@ Citizen.CreateThread(function()
     Citizen.Wait(10)
     movements = createPrompts(keysTable, prompts)
     movements2 = createPrompts(keysTable2, prompts2)
+
+    -- Register NPCs with centralized system
+    Citizen.Wait(1000) -- Wait for hn_recall to load
+    RegisterNPCsWithCentralizedSystem()
 end)
+
+-- Register FX-Idcard NPCs with the centralized system
+function RegisterNPCsWithCentralizedSystem()
+    if GetResourceState('hn_recall') ~= 'started' then
+        print('^3[FX-IDCARD] hn_recall not available, using local NPC management^7')
+        return false
+    end
+
+    local npcManager = exports.hn_recall:GetNPCManager()
+    if not npcManager then
+        print('^3[FX-IDCARD] Cannot access centralized NPC manager^7')
+        return false
+    end
+
+    -- Register all ID card NPCs
+    local npcConfigs = {}
+    for locationName, npcData in pairs(Config.IDCardNPC) do
+        local npcId = 'fx_idcard_' .. locationName
+        npcConfigs[npcId] = {
+            category = npcData.illegal and 'law' or 'idcard',
+            label = npcData.illegal and 'Illegal Identity Services' or 'Identity Card Services',
+            coords = npcData.coords,
+            model = npcData.models,
+            distance = npcData.distance or 3,
+            spawnDistance = Config.PedSpawnDistance or 50,
+            blip = npcData.blips,
+            timeSettings = npcData.timeSettings,
+            anims = npcData.anims,
+            interactions = {
+                {
+                    name = npcId .. '_main',
+                    icon = 'fas fa-id-card',
+                    label = npcData.illegal and Locale("promptitle3") or Locale("promptitle2"),
+                    onSelect = function()
+                        TriggerServerEvent('fx-idcard:server:useImagePlease', locationName)
+                    end
+                }
+            },
+            -- Store original data for compatibility
+            originalLocation = locationName,
+            illegal = npcData.illegal
+        }
+    end
+
+    npcManager:RegisterNPCs(npcConfigs)
+    print('^2[FX-IDCARD] Registered ' .. table.length(npcConfigs) .. ' NPCs with centralized system^7')
+    return true
+end
 
 RegisterNUICallback('close',function()
     SetNuiFocus(false,false)
@@ -107,6 +161,9 @@ function GetClosestPlayer()
     end
     return closestPlayer
 end
+
+-- FX-IDCARD NPCs are now managed by hn_recall centralized system
+-- These functions are kept for backward compatibility if needed
 
 RegisterNetEvent('fx-idcard:client:updateData',function()
     TriggerServerEvent('fx-idcard:server:GetData')
@@ -268,31 +325,36 @@ local function takePhoto(v)
     end)
 end
 
+-- Photographer interaction (fallback when ox_target is not available)
 Citizen.CreateThread(function()
     while true do
         local sleep = 2000
-        for k,v in pairs(Config.Photographers) do
-            local ped = PlayerPedId()
-            local coords = GetEntityCoords(ped)
-            local dist = #(vector3(v.promptCoords.x,v.promptCoords.y,v.promptCoords.z) - coords)
-            if dist < v.promptDistance then
-                sleep = 1 
-                local title = CreateVarString(10, 'LITERAL_STRING',Locale("promptitle"))
-                if Config.Prices.printphoto then
-                    title = CreateVarString(10, 'LITERAL_STRING',Locale("promptitle2").." $"..Config.Prices.printphoto)
-                end
-                PromptSetActiveGroupThisFrame(prompts, title)
-                setActivePrompts("photo")
-                if PromptHasHoldModeCompleted(movements[1]) then
-                    sleep = 2000
-                    Config.HideHud()
-                    takePhoto(v)
-                elseif PromptHasHoldModeCompleted(movements[2]) then
-                    sleep = 2000
-                    SetNuiFocus(true,true)
-                    SendNUIMessage({
-                        action = 'print',
-                    })
+
+        -- Only use traditional prompts if ox_target is not available
+        if GetResourceState('ox_target') ~= 'started' then
+            for k,v in pairs(Config.Photographers) do
+                local ped = PlayerPedId()
+                local coords = GetEntityCoords(ped)
+                local dist = #(vector3(v.promptCoords.x,v.promptCoords.y,v.promptCoords.z) - coords)
+                if dist < v.promptDistance then
+                    sleep = 1
+                    local title = CreateVarString(10, 'LITERAL_STRING',Locale("promptitle"))
+                    if Config.Prices.printphoto then
+                        title = CreateVarString(10, 'LITERAL_STRING',Locale("promptitle2").." $"..Config.Prices.printphoto)
+                    end
+                    PromptSetActiveGroupThisFrame(prompts, title)
+                    setActivePrompts("photo")
+                    if PromptHasHoldModeCompleted(movements[1]) then
+                        sleep = 2000
+                        Config.HideHud()
+                        takePhoto(v)
+                    elseif PromptHasHoldModeCompleted(movements[2]) then
+                        sleep = 2000
+                        SetNuiFocus(true,true)
+                        SendNUIMessage({
+                            action = 'print',
+                        })
+                    end
                 end
             end
         end
@@ -308,106 +370,12 @@ local function isOpen(settings)
     return time >= settings.open and time <= settings.close
 end
 
-local function spawnPed(v,coords)
-    local modelHash = GetHashKey(v.models)
-    RequestModel(modelHash)
-    while not HasModelLoaded(modelHash) do
-        Citizen.Wait(10)
-    end
-    local npc = CreatePed(modelHash, coords.x, coords.y, coords.z-1, coords.w, false, 0)
-    FreezeEntityPosition(npc, true)
-    Citizen.InvokeNative(0x283978A15512B2FE, npc, true)
-    SetEntityCanBeDamaged(npc, false)
-    SetEntityInvincible(npc, true)
-    SetBlockingOfNonTemporaryEvents(npc, true)
-    SetModelAsNoLongerNeeded(modelHash)
-    SetEntityAsMissionEntity(npc, true, true)
-    if v.anims and v.anims.name then
-        RequestAnimDict(v.anims.dict)
-        while not HasAnimDictLoaded(v.anims.dict) do
-            Citizen.Wait(100)
-        end
-        TaskPlayAnim(npc, v.anims.dict, v.anims.name, 1.0, -1.0, -1, 1, 0, true, 0, false, 0, false)
-    elseif v.anims then
-        TaskStartScenarioInPlace(npc, GetHashKey(v.anims.dict), 0, true, false, false, false)
-    end
-    return npc
-end
+-- NPC spawning is now handled by hn_recall centralized system
 
-local function createBlip(v)
-    local blip = N_0x554d9d53f696d002(1664425300, v.coords.x,v.coords.y,v.coords.z)
-    Citizen.InvokeNative(0x0DF2B55F717DDB10, blip, false)
-    Citizen.InvokeNative(0x662D364ABF16DE2F, blip, joaat(v.blips.modifier))
-    SetBlipSprite(blip, v.blips.sprite, 1)
-    SetBlipScale(blip, v.blips.scale)
-    Citizen.InvokeNative(0x9CB1A1623062F402, blip, v.blips.name)
-    return blip
-end
+-- Blip creation is now handled by hn_recall centralized system
 
-local function checkNPCS()
-    local ped = PlayerPedId()
-    local coords = GetEntityCoords(ped)
-    for k,v in pairs(Config.IDCardNPC) do
-        local dist = #(coords - vector3(v.coords.x,v.coords.y,v.coords.z))
-        if dist < Config.PedSpawnDistance and not v.npc and isOpen(v.timeSettings) then
-            v.npc = spawnPed(v,v.coords)
-            v.canInteract = true
-        elseif v.npc and (dist > Config.PedSpawnDistance or not isOpen(v.timeSettings)) then
-            DeletePed(v.npc)
-            v.npc = nil
-            v.canInteract = nil
-        end
-        if v.blips and not v.blip then
-            v.blip = createBlip(v)
-        end 
-        if v.blip then
-            if isOpen(v.timeSettings) then
-                Citizen.InvokeNative(0x662D364ABF16DE2F, v.blip, joaat(v.blips.modifier))
-            else
-                Citizen.InvokeNative(0x662D364ABF16DE2F, v.blip, joaat(v.timeSettings.blipmodifier))
-            end
-        end
-    end
-end 
-Citizen.CreateThread(function()
-    while true do
-        checkNPCS()
-        Wait(2000)
-    end
-end)
-Citizen.CreateThread(function()
-    while true do
-        local sleep = 2000
-        local ped = PlayerPedId()
-        local coords = GetEntityCoords(ped)
-        for k,v in pairs(Config.IDCardNPC) do
-            local dist = #(coords - vector3(v.coords.x,v.coords.y,v.coords.z))
-            if dist < v.distance and v.canInteract then
-                sleep = 1
-                local title = CreateVarString(10, 'LITERAL_STRING',Locale("promptitle2"))
-                if Config.Prices.idcard then
-                    title = CreateVarString(10, 'LITERAL_STRING',Locale("promptitle2").." $"..Config.Prices.idcard)
-                    if v.illegal then
-                        if Config.Prices.illegal then
-                            title = CreateVarString(10, 'LITERAL_STRING',Locale("promptitle3").." $"..Config.Prices.illegal)
-                        end
-                    end
-                end
-                PromptSetActiveGroupThisFrame(prompts2, title)
-                if PromptHasHoldModeCompleted(movements2[1]) then
-                    Wait(50)
-                    Notify({
-                        text = Locale("useitem", {time=Config.SelectPhotoTime}),
-                        time = 10000,
-                        type = "success"
-                    })
-                    TriggerServerEvent('fx-idcard:server:useImagePlease', k)
-                end
-            end
-        end
-        Wait(sleep)
-    end
-end)
+-- NPC management is now handled by hn_recall centralized system
+-- NPC interactions are now handled by hn_recall centralized system
 
 if Config.TakeCardType == "sql" then
     RegisterCommand(Config.ShowIdcardCommand, function()
@@ -419,18 +387,14 @@ AddEventHandler('onResourceStop', function(resourceName)
     if (GetCurrentResourceName() ~= resourceName) then
         return
     end
-    for k,v in pairs(Config.IDCardNPC) do
-        if v.npc then
-            DeletePed(v.npc)
-        end
-        if v.blip then
-            RemoveBlip(v.blip)
-        end
-    end
+
+    -- NPCs are now managed by hn_recall centralized system
+    -- No need to manually cleanup NPCs, blips, or ox_target
+
     if cam then
         RenderScriptCams(false, false, 0, true, true)
         DestroyCam(cam, true)
-        cam = nil            
+        cam = nil
         SetPlayerControl(PlayerId(), true)
         FreezeEntityPosition(PlayerPedId(), false)
     end
